@@ -133,9 +133,16 @@ QUESTION: [1 Hebrew question for self-reflection]`;
 
     try {
       const tryFetch = async () => {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const isLocal = window.location.hostname === "localhost";
+        const url = isLocal
+          ? "https://api.anthropic.com/v1/messages"
+          : "/api/claude";
+        const headers = isLocal
+          ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
+          : { "content-type": "application/json" };
+        const res = await fetch(url, {
           method: "POST",
-          headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+          headers,
           body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 800, messages: [{ role: "user", content: prompt }] }),
         });
         const data = JSON.parse(await res.text());
