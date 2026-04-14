@@ -53,7 +53,7 @@ function CardSVG({ card, isReversed, animating }) {
   return (
     <div style={{ position: "relative", width: 180, height: 300 }}>
       <svg viewBox="0 0 120 200" xmlns="http://www.w3.org/2000/svg" style={{ width: 180, height: 300, display: "block",
-        animation: animating ? "flip 1.2s ease-in-out" : "glow 3s ease-in-out infinite",
+        animation: animating ? "flip 1.2s ease-in-out" : "reveal .8s cubic-bezier(.22,1,.36,1), glow 3s ease-in-out infinite 1s",
         boxShadow: isReversed ? "0 0 35px rgba(150,50,150,.3)" : "0 0 35px rgba(150,120,50,.3)",
         transform: flipped ? "rotate(180deg)" : "none",
         transition: "transform .5s", borderRadius: 12,
@@ -70,6 +70,7 @@ function CardSVG({ card, isReversed, animating }) {
       }}>
         {card.nameEn.toUpperCase()}
       </div>
+
 
     </div>
   );
@@ -93,12 +94,48 @@ function fmtDate() {
   return new Date().toLocaleDateString("he-IL", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
 
+function saveToHistory(cardName, isReversed) {
+  const key = "tarot_history";
+  try {
+    const hist = JSON.parse(localStorage.getItem(key)) || [];
+    const today = new Date().toISOString().slice(0, 10);
+    if (hist[0]?.date === today) return;
+    hist.unshift({ date: today, card: cardName, reversed: isReversed });
+    localStorage.setItem(key, JSON.stringify(hist.slice(0, 7)));
+  } catch {}
+}
+
+function getHistory() {
+  try { return JSON.parse(localStorage.getItem("tarot_history")) || []; } catch { return []; }
+}
+
+function fmtShortDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString("he-IL", { weekday: "short", day: "numeric", month: "numeric" });
+}
+
 export default function App() {
   const [phase, setPhase] = useState("intro");
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
+  const [history] = useState(() => getHistory());
+  const [toast, setToast] = useState("");
   const [gender, setGender] = useState(() => localStorage.getItem("tarot_gender") || null);
+  const [profile, setProfile] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("tarot_profile")) || null; } catch { return null; }
+  });
+  const [onboarding, setOnboarding] = useState({ step: 0, firstName: "", birthDate: "", motherName: "", fatherName: "" });
+  const [morningEnergy, setMorningEnergy] = useState("");
+  const [askEnergy, setAskEnergy] = useState(false);
   const { card, isReversed } = getDailyCard();
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const cachedReading = (() => {
+    try {
+      const c = JSON.parse(localStorage.getItem("tarot_reading_cache"));
+      return c && c.date === todayKey && c.card === card.name ? c.text : null;
+    } catch { return null; }
+  })();
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -107,7 +144,15 @@ export default function App() {
     document.head.appendChild(link);
   }, []);
 
-  async function getReading() {
+  async function getReading(energyOverride) {
+    const energy = energyOverride || morningEnergy;
+
+    if (cachedReading) {
+      setText(cachedReading);
+      setPhase("done");
+      return;
+    }
+
     setPhase("loading");
     setErr("");
 
@@ -119,10 +164,23 @@ export default function App() {
     };
     const g = gMap[gender] || gMap.male;
 
+    const birthInfo = profile?.birthDate ? (() => {
+      const d = new Date(profile.birthDate);
+      const signs = ["גדי","דלי","דגים","טלה","שור","תאומים","סרטן","אריה","בתולה","מאזניים","עקרב","קשת"];
+      const m = d.getMonth(); const day = d.getDate();
+      const borders = [20,19,20,20,21,21,22,23,23,23,22,22];
+      const sign = signs[day <= borders[m] ? m : (m+1)%12];
+      const lifeNum = String(profile.birthDate.replace(/-/g,'')).split('').reduce((a,b)=>a+parseInt(b),0);
+      let n = lifeNum; while(n>9&&n!==11&&n!==22&&n!==33) n = String(n).split('').reduce((a,b)=>a+parseInt(b),0);
+      return { sign, lifeNum: n };
+    })() : null;
+
     const prompt = `You are Fortuna - a Hebrew-speaking tarot reader with the voice of a warm, all-knowing neighbor who has seen everything. You speak like someone who has known the reader their entire life. Mix mystical insight with grounded everyday wisdom. Be slightly dramatic but self-aware. Intimate, never cold. You love giving small, specific, sensory lifestyle suggestions — things like drinking a specific herbal tea, taking a long bath, eating something nourishing, fixing something small at home, going outside barefoot, lighting a candle. These feel like natural extensions of the card's energy, not generic wellness advice.
 
 Card: "${card.nameEn}" (${card.name}), ${isReversed ? "reversed" : "upright"}. Keywords: ${card.keywords.join(", ")}.
-Address the reader as "${g.address}" (Hebrew gender form: ${g.form}). Use correct Hebrew gender agreement throughout.
+${profile ? `Reader: ${profile.firstName}${birthInfo ? `, ${birthInfo.sign}, life number ${birthInfo.lifeNum}` : ""}${profile.motherName ? `, mother: ${profile.motherName}` : ""}${profile.fatherName ? `, father: ${profile.fatherName}` : ""}.` : ""}
+${energy ? `Morning energy: "${energy}".` : ""}
+Address the reader as "${g.address}" (Hebrew gender form: ${g.form}). Use correct Hebrew gender agreement throughout. If you know the reader's name, use it naturally once. Weave in their astrological sign and life number subtly if available.
 
 Write exactly 5 lines. Each line starts with one label followed immediately by the content (no line breaks within a section):
 MEANING: [1-2 Hebrew sentences about the card's energy today]
@@ -133,16 +191,9 @@ QUESTION: [1 Hebrew question for self-reflection]`;
 
     try {
       const tryFetch = async () => {
-        const isLocal = window.location.hostname === "localhost";
-        const url = isLocal
-          ? "https://api.anthropic.com/v1/messages"
-          : "/api/claude";
-        const headers = isLocal
-          ? { "content-type": "application/json", "anthropic-version": "2023-06-01" }
-          : { "content-type": "application/json" };
-        const res = await fetch(url, {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          headers,
+          headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
           body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 800, messages: [{ role: "user", content: prompt }] }),
         });
         const data = JSON.parse(await res.text());
@@ -156,6 +207,8 @@ QUESTION: [1 Hebrew question for self-reflection]`;
       let result = "";
       try { result = await tryFetch(); } catch { result = await tryComplete(); }
       if (!result) throw new Error("תגובה ריקה");
+      localStorage.setItem("tarot_reading_cache", JSON.stringify({ date: todayKey, card: card.name, text: result }));
+      saveToHistory(card.name, isReversed);
       setText(result);
       setPhase("done");
     } catch (e) {
@@ -178,11 +231,13 @@ QUESTION: [1 Hebrew question for self-reflection]`;
 
       <style>{`
         @keyframes tw { 0%,100%{opacity:.08} 50%{opacity:.55} }
-        @keyframes flip { 0%{transform:rotateY(0)} 50%{transform:rotateY(90deg)} 100%{transform:rotateY(0)} }
+        @keyframes flip { 0%{transform:rotateY(0) scale(1)} 40%{transform:rotateY(90deg) scale(1.04)} 100%{transform:rotateY(0) scale(1)} }
+        @keyframes reveal { from{opacity:0;transform:scale(.92) translateY(12px)} to{opacity:1;transform:scale(1) translateY(0)} }
         @keyframes up { from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:translateY(0)} }
         @keyframes glow { 0%,100%{box-shadow:0 0 18px rgba(200,160,80,.25)} 50%{box-shadow:0 0 38px rgba(200,160,80,.55)} }
         @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.03)} }
         @keyframes spin { to{transform:rotate(360deg)} }
+        @keyframes toastIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
       `}</style>
 
       <div style={{ textAlign: "center", marginBottom: "2rem", zIndex: 1 }}>
@@ -228,38 +283,102 @@ QUESTION: [1 Hebrew question for self-reflection]`;
         </div>
       )}
 
-      {phase === "revealed" && !gender && (
-        <div style={{ textAlign: "center", animation: "up .6s ease", maxWidth: 340 }}>
-          <p style={{ fontSize: ".9rem", color: "#c8b898", fontWeight: "300", marginBottom: "1.2rem", lineHeight: 1.8 }}>
-            רגע לפני שאני פותחת את הקלף...<br/>איך לפנות אליך, נשמה?
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: ".6rem", justifyContent: "center" }}>
-            {[{ key: "male", label: "אליי — יקירי" }, { key: "female", label: "אליי — יקירתי" }, { key: "plural_m", label: "אלינו — יקיריי" }, { key: "plural_f", label: "אלינו — יקירותיי" }].map(opt => (
-              <button key={opt.key} onClick={() => { localStorage.setItem("tarot_gender", opt.key); setGender(opt.key); }}
-                style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1.2rem", fontSize: ".8rem", letterSpacing: ".08em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit", transition: "background .3s" }}
-                onMouseEnter={e => e.currentTarget.style.background = "rgba(160,128,64,.15)"}
-                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      {phase === "revealed" && (() => {
+        const needsGender = !gender;
+        const needsProfile = gender && !profile;
+        const needsEnergy = gender && profile && askEnergy;
+        const readyToRead = gender && profile && !askEnergy;
 
-      {phase === "revealed" && gender && (
-        <div style={{ textAlign: "center", animation: "up .4s ease" }}>
-          <button onClick={getReading}
-            style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".75rem 2rem", fontSize: ".85rem", letterSpacing: ".15em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit", transition: "background .3s", display: "block", margin: "0 auto" }}
-            onMouseEnter={e => e.currentTarget.style.background = "rgba(160,128,64,.15)"}
-            onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-            פורטונה, מה הקלף אומר?
-          </button>
-          <button onClick={() => { localStorage.removeItem("tarot_gender"); setGender(null); }}
-            style={{ background: "transparent", border: "none", color: "#5a4a35", fontSize: ".65rem", letterSpacing: ".1em", cursor: "pointer", fontFamily: "inherit", marginTop: ".6rem", textDecoration: "underline" }}>
-            שנה/י פנייה
-          </button>
-        </div>
-      )}
+        if (needsGender) return (
+          <div style={{ textAlign: "center", animation: "up .6s ease", maxWidth: 340 }}>
+            <p style={{ fontSize: ".9rem", color: "#c8b898", fontWeight: "300", marginBottom: "1.4rem", lineHeight: 1.8 }}>
+              רגע לפני שאני פותחת את הקלף...<br/>איך לפנות אליך, נשמה?
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: ".6rem", justifyContent: "center" }}>
+              {[{ key: "male", label: "יקירי" }, { key: "female", label: "יקירתי" }, { key: "plural_m", label: "יקיריי" }, { key: "plural_f", label: "יקירותיי" }].map(opt => (
+                <button key={opt.key} onClick={() => { localStorage.setItem("tarot_gender", opt.key); setGender(opt.key); }}
+                  style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1.4rem", fontSize: ".85rem", letterSpacing: ".1em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit", transition: "background .3s" }}
+                  onMouseEnter={e => e.currentTarget.style.background = "rgba(160,128,64,.15)"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+
+        if (needsProfile) return (
+          <div style={{ textAlign: "center", animation: "up .6s ease", maxWidth: 360, width: "100%" }}>
+            {onboarding.step === 0 && (
+              <div>
+                <p style={{ fontSize: ".9rem", color: "#c8b898", fontWeight: "300", marginBottom: "1.2rem", lineHeight: 1.8 }}>
+                  {gender === "male" ? "יקירי" : gender === "female" ? "יקירתי" : "יקיריי"} — מה שמך?
+                </p>
+                <input type="text" placeholder="שם פרטי" value={onboarding.firstName}
+                  onChange={e => setOnboarding(o => ({...o, firstName: e.target.value}))}
+                  style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1rem", fontSize: ".85rem", borderRadius: 4, fontFamily: "inherit", width: "100%", marginBottom: "1.2rem", textAlign: "center", outline: "none" }}/>
+                <p style={{ fontSize: ".9rem", color: "#c8b898", fontWeight: "300", marginBottom: "1.2rem", lineHeight: 1.8 }}>
+                  ומתי הגחת לעולם הזה?
+                </p>
+                <input type="date" value={onboarding.birthDate}
+                  onChange={e => setOnboarding(o => ({...o, birthDate: e.target.value}))}
+                  style={{ background: "transparent", border: "1px solid #4a3a1a", color: "#a08060", padding: ".6rem 1rem", fontSize: ".85rem", borderRadius: 4, fontFamily: "inherit", width: "100%", marginBottom: "1.4rem", outline: "none" }}/>
+                <button onClick={() => onboarding.firstName && setOnboarding(o => ({...o, step: 1}))}
+                  style={{ background: "transparent", border: `1px solid ${onboarding.firstName ? "#a08040" : "#4a3a1a"}`, color: onboarding.firstName ? "#e8dcc8" : "#5a4a35", padding: ".6rem 2rem", fontSize: ".8rem", letterSpacing: ".1em", borderRadius: 4, cursor: onboarding.firstName ? "pointer" : "default", fontFamily: "inherit" }}>
+                  המשך
+                </button>
+              </div>
+            )}
+            {onboarding.step === 1 && (
+              <div>
+                <p style={{ fontSize: ".9rem", color: "#c8b898", fontWeight: "300", marginBottom: "1.4rem", lineHeight: 1.8 }}>
+                  ומי הביא אותך לכאן?
+                </p>
+                <input type="text" placeholder="שם האם" value={onboarding.motherName}
+                  onChange={e => setOnboarding(o => ({...o, motherName: e.target.value}))}
+                  style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1rem", fontSize: ".85rem", borderRadius: 4, fontFamily: "inherit", width: "100%", marginBottom: ".8rem", textAlign: "center", outline: "none" }}/>
+                <input type="text" placeholder="שם האב" value={onboarding.fatherName}
+                  onChange={e => setOnboarding(o => ({...o, fatherName: e.target.value}))}
+                  style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1rem", fontSize: ".85rem", borderRadius: 4, fontFamily: "inherit", width: "100%", marginBottom: "1.2rem", textAlign: "center", outline: "none" }}/>
+                <div style={{ display: "flex", gap: ".6rem", justifyContent: "center" }}>
+                  <button onClick={() => {
+                    const p = { firstName: onboarding.firstName, birthDate: onboarding.birthDate, motherName: onboarding.motherName, fatherName: onboarding.fatherName };
+                    localStorage.setItem("tarot_profile", JSON.stringify(p));
+                    setProfile(p);
+                  }} style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1.8rem", fontSize: ".8rem", letterSpacing: ".1em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit" }}>
+                    סיום
+                  </button>
+                  <button onClick={() => {
+                    const p = { firstName: onboarding.firstName, birthDate: onboarding.birthDate, motherName: "", fatherName: "" };
+                    localStorage.setItem("tarot_profile", JSON.stringify(p));
+                    setProfile(p);
+                  }} style={{ background: "transparent", border: "none", color: "#5a4a35", fontSize: ".7rem", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+                    דלג/י
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+
+
+        if (readyToRead) return (
+          <div style={{ textAlign: "center", animation: "up .4s ease" }}>
+            <button onClick={() => getReading("")}
+              style={{ background: "transparent", border: "1px solid #a08040", color: "#e8dcc8", padding: ".75rem 2rem", fontSize: ".85rem", letterSpacing: ".15em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit", transition: "background .3s", display: "block", margin: "0 auto" }}
+              onMouseEnter={e => e.currentTarget.style.background = "rgba(160,128,64,.15)"}
+              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+              פורטונה, מה הקלף אומר?
+            </button>
+            <button onClick={() => { localStorage.removeItem("tarot_gender"); setGender(null); }}
+              style={{ background: "transparent", border: "none", color: "#5a4a35", fontSize: ".65rem", letterSpacing: ".1em", cursor: "pointer", fontFamily: "inherit", marginTop: ".6rem", textDecoration: "underline", color: "#7a6a50" }}>
+              שנה/י פנייה
+            </button>
+          </div>
+        );
+
+        return null;
+      })()}
 
       {phase === "loading" && (
         <div style={{ textAlign: "center", color: "#a08060", animation: "up .5s ease" }}>
@@ -279,7 +398,7 @@ QUESTION: [1 Hebrew question for self-reflection]`;
       {phase === "done" && text && (
         <div style={{ maxWidth: 520, width: "100%", animation: "up .8s ease", borderTop: "1px solid #3a2a1a", paddingTop: "1.5rem", marginTop: ".5rem" }}>
           {text.split("\n").filter(Boolean).map((line, i) => {
-            const labelMap = { "MEANING:": "משמעות הקלף", "MESSAGE:": "מסר ליום", "ADVICE:": "עצה מעשית", "QUESTION:": "שאלה לחשיבה" };
+            const labelMap = { "MEANING:": "משמעות הקלף", "MESSAGE:": "מסר יומי", "ADVICE:": "עצה מעשית", "QUESTION:": "שאלה לחשיבה" };
             const label = Object.keys(labelMap).find(k => line.startsWith(k));
             if (label) return (
               <div key={i} style={{ marginBottom: "1.2rem" }}>
@@ -305,9 +424,58 @@ QUESTION: [1 Hebrew question for self-reflection]`;
             }
             return <p key={i} style={{ lineHeight: 1.9, fontSize: ".92rem", color: "#c8b898", fontWeight: "300", marginBottom: ".5rem" }}>{line}</p>;
           })}
-          <div style={{ marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid #3a2a1a", textAlign: "center", fontSize: ".75rem", color: "#8a7a60", letterSpacing: ".08em", fontStyle: "italic", fontWeight: "300" }}>
-            פורטונה תחכה לך מחר עם קלף חדש ✦
+               <div style={{ marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid #2a1a0a", textAlign: "center" }}>
+            <button onClick={async () => {
+              const msgLines = text.split("\n").filter(Boolean);
+              const labelMap = { "MEANING:": "משמעות", "MESSAGE:": "מסר", "ADVICE:": "עצה", "QUESTION:": "שאלה", "RITUAL:": "לעשות היום" };
+              const msg = msgLines.map(line => {
+                const label = Object.keys(labelMap).find(k => line.startsWith(k));
+                return label ? labelMap[label] + ": " + line.slice(label.length).trim() : line;
+              }).join("\n");
+              const shareText = "✦ קלף היום: " + card.name + (isReversed ? " (הפוך)" : "") + "\n\n" + msg + "\n\nפורטונה | קלף יומי";
+              if (navigator.share) { navigator.share({ text: shareText }); }
+              else {
+                try {
+                  await navigator.clipboard.writeText(shareText);
+                } catch {
+                  const ta = document.createElement("textarea");
+                  ta.value = shareText;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
+                }
+                setToast("הקריאה הועתקה ✦");
+                setTimeout(() => setToast(""), 2500);
+              }
+            }} style={{ background: "rgba(160,128,64,.12)", border: "1px solid #a08040", color: "#e8dcc8", padding: ".55rem 1.6rem", fontSize: ".78rem", letterSpacing: ".12em", borderRadius: 4, cursor: "pointer", fontFamily: "inherit", transition: "all .3s", marginBottom: ".8rem" }}
+              onMouseEnter={e => { e.currentTarget.style.background="rgba(160,128,64,.25)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background="rgba(160,128,64,.12)"; }}>
+              💫 שתף את הקריאה
+            </button>
+            <div style={{ fontSize: ".72rem", color: "#8a7a60", letterSpacing: ".08em", fontStyle: "italic", fontWeight: "300" }}>
+              פורטונה תחכה לך מחר עם קלף חדש ✦
+            </div>
           </div>
+
+          {history.length > 1 && (
+            <div style={{ marginTop: "2rem", paddingTop: "1rem", borderTop: "1px solid #1a1408" }}>
+              <div style={{ fontSize: ".62rem", letterSpacing: ".2em", color: "#6a5a40", marginBottom: ".8rem", textTransform: "uppercase" }}>קלפים אחרונים</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: ".4rem" }}>
+                {history.slice(1).map((h, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: ".35rem .6rem", border: "1px solid #1a1408", borderRadius: 4 }}>
+                    <span style={{ fontSize: ".75rem", color: "#8a7a5a", fontWeight: "300" }}>{h.card}{h.reversed ? " ↓" : ""}</span>
+                    <span style={{ fontSize: ".65rem", color: "#4a3a20", letterSpacing: ".05em" }}>{fmtShortDate(h.date)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {toast && (
+        <div style={{ position: "fixed", bottom: "2rem", left: "50%", transform: "translateX(-50%)", background: "#1a1408", border: "1px solid #a08040", color: "#e8dcc8", padding: ".6rem 1.4rem", borderRadius: 4, fontSize: ".8rem", letterSpacing: ".1em", animation: "toastIn .3s ease", zIndex: 100, whiteSpace: "nowrap", fontFamily: "'Assistant', sans-serif" }}>
+          {toast}
         </div>
       )}
     </div>
