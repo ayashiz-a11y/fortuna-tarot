@@ -191,9 +191,9 @@ QUESTION: [1 Hebrew question for self-reflection]`;
 
     try {
       const tryFetch = async () => {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const res = await fetch("/api/claude", {
           method: "POST",
-          headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+          headers: { "content-type": "application/json" },
           body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 800, messages: [{ role: "user", content: prompt }] }),
         });
         const data = JSON.parse(await res.text());
